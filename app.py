@@ -169,17 +169,13 @@ def sent_command(client, pc):
     payload = request.get_json(silent=True) or {}
     ctype = payload.get("type")
 
-    if ctype == "list_processes":
-        cmd = {"id": uuid.uuid4().hex, "type": "list_processes"}
-    elif ctype == "kill_process":
-        pid = payload.get("pid")
-        name = str(payload.get("name", ""))[:200]
-        if not isinstance(pid, int) or pid <= 0:
-            return jsonify({"Succes": False, "Error": "bad pid"})
-        cmd = {"id": uuid.uuid4().hex, "type": "kill_process",
-               "pid": pid, "name": name}
-    else:
-        return jsonify({"Succes": False, "Error": "unknown type"})
+    if not ctype:
+        return jsonify({"Succes": False, "Error": "no type"})
+
+    # Никакого whitelist — берём весь payload как есть
+    cmd = dict(payload)
+    cmd["id"] = uuid.uuid4().hex
+    cmd["type"] = ctype
 
     with commands_lock:
         commands.setdefault((client, pc), []).append(cmd)
